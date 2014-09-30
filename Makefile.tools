@@ -207,6 +207,14 @@ EXTRA_DIST += tools/hciattach.1 tools/hciconfig.1 \
 			tools/sdptool.1 tools/ciptool.1 tools/bccmd.1
 endif
 
+if TOOLS
+bin_PROGRAMS += tools/btgatt-server
+
+tools_btgatt_server_SOURCES = tools/btgatt-server.c src/uuid-helper.c
+tools_btgatt_server_LDADD = lib/libbluetooth-internal.la \
+			    	src/libshared-mainloop.la
+endif
+
 if HID2HCI
 udevdir = @UDEV_DIR@
 
