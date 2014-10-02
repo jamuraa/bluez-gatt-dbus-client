@@ -46,6 +46,8 @@
 
 #define ATT_CID 4
 
+#define UUID_GAP 0x1800
+
 #define PRLOG(...) \
 	printf(__VA_ARGS__); print_prompt();
 
@@ -58,12 +60,19 @@
 #define COLOR_BOLDGRAY	"\x1B[1;30m"
 #define COLOR_BOLDWHITE	"\x1B[1;37m"
 
+static const char test_device_name[] = "Very Long Test Device Name For Testing "
+				"ATT Protocol Operations On GATT Server";
 static bool verbose = false;
 
 struct server {
 	int fd;
 	struct gatt_db *db;
 	struct bt_gatt_server *gatt;
+
+	uint8_t *device_name;
+	size_t name_len;
+
+	bool svc_chngd_enabled;
 };
 
 static void print_prompt(void)
@@ -94,14 +103,216 @@ static void gatt_debug_cb(const char *str, void *user_data)
 	PRLOG(COLOR_GREEN "%s%s\n" COLOR_OFF, prefix, str);
 }
 
-static void ready_cb(bool success, uint8_t att_ecode, void *user_data);
-static void service_changed_cb(uint16_t start_handle, uint16_t end_handle,
-							void *user_data);
+static void gap_appearance_cb(struct gatt_db_attribute *attrib, unsigned int id,
+					uint16_t offset, uint8_t opcode,
+					bdaddr_t *bdaddr, void *user_data)
+{
+	uint16_t appearance = 128;
+	uint8_t value[2];
+
+	put_le16(appearance, value);
+
+	gatt_db_attribute_read_result(attrib, id, 0, value, 2);
+}
+
+
+static void gap_device_name_read_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					uint8_t opcode, bdaddr_t *bdaddr,
+					void *user_data)
+{
+	struct server *server = user_data;
+	uint8_t error = 0;
+	size_t len = 0;
+	const uint8_t *value = NULL;
+
+	PRLOG("GAP Device Name Read called\n");
+
+	len = server->name_len;
+
+	if (offset > len) {
+		error = BT_ATT_ERROR_INVALID_OFFSET;
+		goto done;
+	}
+
+	len -= offset;
+	value = len ? &server->device_name[offset] : NULL;
+
+done:
+	gatt_db_attribute_read_result(attrib, id, error, value, len);
+}
+
+static void gap_device_name_write_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					const uint8_t *value, size_t len,
+					uint8_t opcode, bdaddr_t *bdaddr,
+					void *user_data)
+{
+	struct server *server = user_data;
+	uint8_t error = 0;
+
+	PRLOG("GAP Device Name Write called\n");
+
+	/* Implement this as a variable length attribute value. */
+	if (offset > server->name_len) {
+		error = BT_ATT_ERROR_INVALID_OFFSET;
+		goto done;
+	}
+
+	if (offset + len != server->name_len) {
+		uint8_t *name;
+
+		name = realloc(server->device_name, offset + len);
+		if (!name) {
+			error = BT_ATT_ERROR_INSUFFICIENT_RESOURCES;
+			goto done;
+		}
+
+		memcpy(name, server->device_name,
+					MIN(offset + len, server->name_len));
+		server->device_name = name;
+		server->name_len = offset + len;
+	}
+
+	if (value)
+		memcpy(server->device_name + offset, value, len);
+
+done:
+	gatt_db_attribute_write_result(attrib, id, error);
+}
+
+static void gap_device_name_ext_prop_read_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					uint8_t opcode, bdaddr_t *bdaddr,
+					void *user_data)
+{
+	uint8_t value[2];
+
+	PRLOG("Device Name Extended Properties Read called\n");
+
+	value[0] = BT_GATT_CHRC_EXT_PROP_RELIABLE_WRITE;
+	value[1] = 0;
+
+	gatt_db_attribute_read_result(attrib, id, 0, value, 2);
+}
+
+static void gatt_service_changed_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					uint8_t opcode, bdaddr_t *bdaddr,
+					void *user_data)
+{
+	PRLOG("Service Changed Read called\n");
+
+	gatt_db_attribute_read_result(attrib, id, 0, NULL, 0);
+}
+
+static void gatt_svc_chngd_ccc_read_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					uint8_t opcode, bdaddr_t *bdaddr,
+					void *user_data)
+{
+	struct server *server = user_data;
+	uint8_t value[2];
+
+	PRLOG("Service Changed CCC Read called\n");
+
+	value[0] = server->svc_chngd_enabled ? 0x02 : 0x00;
+	value[1] = 0x00;
+
+	gatt_db_attribute_read_result(attrib, id, 0, value, 2);
+}
+
+static void gatt_svc_chngd_ccc_write_cb(struct gatt_db_attribute *attrib,
+					unsigned int id, uint16_t offset,
+					const uint8_t *value, size_t len,
+					uint8_t opcode, bdaddr_t *bdaddr,
+					void *user_data)
+{
+	struct server *server = user_data;
+	uint8_t ecode = 0;
+
+	PRLOG("Service Changed CCC Write called\n");
+
+	if (!value || len != 2) {
+		ecode = BT_ATT_ERROR_INVALID_ATTRIBUTE_VALUE_LEN;
+		goto done;
+	}
+
+	if (offset) {
+		ecode = BT_ATT_ERROR_INVALID_OFFSET;
+		goto done;
+	}
+
+	if (value[0] == 0x00)
+		server->svc_chngd_enabled = false;
+	else if (value[0] == 0x02)
+		server->svc_chngd_enabled = true;
+	else
+		ecode = 0x80;
+
+	PRLOG("Service Changed Enabled: %s\n",
+				server->svc_chngd_enabled ? "true" : "false");
+
+done:
+	gatt_db_attribute_write_result(attrib, id, ecode);
+}
+
+static void populate_db(struct server *server)
+{
+	bt_uuid_t uuid;
+	struct gatt_db_attribute *attr;
+
+	/* Add the GAP service */
+	bt_uuid16_create(&uuid, UUID_GAP);
+	attr = gatt_db_add_service(server->db, &uuid, true, 6);
+
+	/* Device Name characteristic */
+	bt_uuid16_create(&uuid, GATT_CHARAC_DEVICE_NAME);
+	gatt_db_service_add_characteristic(attr, &uuid,
+					BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+					BT_GATT_CHRC_PROP_READ,
+					gap_device_name_read_cb,
+					gap_device_name_write_cb,
+					server);
+
+	bt_uuid16_create(&uuid, GATT_CHARAC_EXT_PROPER_UUID);
+	gatt_db_service_add_descriptor(attr, &uuid, BT_ATT_PERM_READ,
+					gap_device_name_ext_prop_read_cb,
+					NULL, server);
+
+	/* Appearance characteristic */
+	bt_uuid16_create(&uuid, GATT_CHARAC_APPEARANCE);
+	gatt_db_service_add_characteristic(attr, &uuid, BT_ATT_PERM_READ,
+							BT_GATT_CHRC_PROP_READ,
+							gap_appearance_cb,
+							NULL, server);
+
+	gatt_db_service_set_active(attr, true);
+
+	/* Add the GATT service */
+	bt_uuid16_create(&uuid, 0x1801);
+	attr = gatt_db_add_service(server->db, &uuid, true, 4);
+
+	bt_uuid16_create(&uuid, GATT_CHARAC_SERVICE_CHANGED);
+	gatt_db_service_add_characteristic(attr, &uuid, BT_ATT_PERM_READ,
+			BT_GATT_CHRC_PROP_READ | BT_GATT_CHRC_PROP_INDICATE,
+			gatt_service_changed_cb,
+			NULL, server);
+
+	bt_uuid16_create(&uuid, GATT_CLIENT_CHARAC_CFG_UUID);
+	gatt_db_service_add_descriptor(attr, &uuid,
+				BT_ATT_PERM_READ | BT_ATT_PERM_WRITE,
+				gatt_svc_chngd_ccc_read_cb,
+				gatt_svc_chngd_ccc_write_cb, server);
+
+	gatt_db_service_set_active(attr, true);
+}
 
 static struct server *server_create(int fd, uint16_t mtu)
 {
 	struct server *server;
 	struct bt_att *att;
+	size_t name_len = strlen(test_device_name);
 
 	server = new0(struct server, 1);
 	if (!server) {
@@ -131,10 +342,22 @@ static struct server *server_create(int fd, uint16_t mtu)
 		return NULL;
 	}
 
+	server->name_len = name_len + 1;
+	server->device_name = malloc(name_len + 1);
+	if (!server->device_name) {
+		bt_att_unref(att);
+		free(server);
+		return NULL;
+	}
+
+	memcpy(server->device_name, test_device_name, name_len);
+	server->device_name[name_len] = '\0';
+
 	server->fd = fd;
 	server->db = gatt_db_new();
 	if (!server->db) {
 		fprintf(stderr, "Failed to create GATT database\n");
+		free(server->device_name);
 		bt_att_unref(att);
 		free(server);
 		return NULL;
@@ -144,6 +367,7 @@ static struct server *server_create(int fd, uint16_t mtu)
 	if (!server->gatt) {
 		fprintf(stderr, "Failed to create GATT server\n");
 		gatt_db_destroy(server->db);
+		free(server->device_name);
 		bt_att_unref(att);
 		free(server);
 		return NULL;
@@ -157,6 +381,8 @@ static struct server *server_create(int fd, uint16_t mtu)
 
 	/* bt_gatt_server already holds a reference */
 	bt_att_unref(att);
+
+	populate_db(server);
 
 	return server;
 }
