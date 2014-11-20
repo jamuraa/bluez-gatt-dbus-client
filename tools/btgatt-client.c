@@ -96,10 +96,108 @@ static void ready_cb(bool success, uint8_t att_ecode, void *user_data);
 static void service_changed_cb(uint16_t start_handle, uint16_t end_handle,
 							void *user_data);
 
+
+static struct bt_gatt_service_list *prepopulate_services(void)
+{
+	struct bt_gatt_service_list *l;
+	bt_uuid_t uuid;
+
+	l = bt_gatt_service_list_new();
+	if (!l)
+		return NULL;
+
+	/* GAP Service */
+	{
+		bt_gatt_service_t svc;
+		bt_gatt_characteristic_t chrcs[2];
+		bt_gatt_descriptor_t desc;
+
+		bt_string_to_uuid(&uuid, "00001800-0000-1000-8000-00805f9b34fb");
+
+		svc.primary = true;
+		svc.start_handle = 0x0001;
+		svc.end_handle = 0x0006;
+		memcpy(svc.uuid, uuid.value.u128.data, 16);
+
+		bt_string_to_uuid(&uuid, "00002a00-0000-1000-8000-00805f9b34fb");
+
+		memset(&chrcs, 0, sizeof(chrcs));
+		chrcs[0].start_handle = 0x0002;
+		chrcs[0].end_handle = 0x0004;
+		chrcs[0].value_handle = 0x0003;
+		chrcs[0].properties = 0x02;
+		memcpy(chrcs[0].uuid, uuid.value.u128.data, 16);
+
+		bt_string_to_uuid(&uuid, "00002900-0000-1000-8000-00805f9b34fb");
+
+		memset(&desc, 0, sizeof(desc));
+		desc.handle = 0x0004;
+		memcpy(desc.uuid, uuid.value.u128.data, 16);
+
+		chrcs[0].descs = &desc;
+		chrcs[0].num_descs = 1;
+
+		bt_string_to_uuid(&uuid, "00002a01-0000-1000-8000-00805f9b34fb");
+
+		chrcs[1].start_handle = 0x0005;
+		chrcs[1].end_handle = 0x0006;
+		chrcs[1].value_handle = 0x0006;
+		chrcs[1].properties = 0x02;
+		memcpy(chrcs[1].uuid, uuid.value.u128.data, 16);
+
+		if (!bt_gatt_service_list_add_service(l, &svc, chrcs, 2,
+								NULL, 0))
+			goto fail;
+	}
+
+	/* GATT Service */
+	{
+		bt_gatt_service_t svc;
+		bt_gatt_characteristic_t chrc;
+		bt_gatt_descriptor_t desc;
+
+		bt_string_to_uuid(&uuid, "00001801-0000-1000-8000-00805f9b34fb");
+
+		svc.primary = true;
+		svc.start_handle = 0x0007;
+		svc.end_handle = 0x000a;
+		memcpy(svc.uuid, uuid.value.u128.data, 16);
+
+		bt_string_to_uuid(&uuid, "00002a05-0000-1000-8000-00805f9b34fb");
+
+		memset(&chrc, 0, sizeof(chrc));
+		chrc.start_handle = 0x0008;
+		chrc.end_handle = 0x000a;
+		chrc.value_handle = 0x0009;
+		chrc.properties = 0x22;
+		memcpy(chrc.uuid, uuid.value.u128.data, 16);
+
+		bt_string_to_uuid(&uuid, "00002902-0000-1000-8000-00805f9b34fb");
+
+		memset(&desc, 0, sizeof(desc));
+		desc.handle = 0x000a;
+		memcpy(desc.uuid, uuid.value.u128.data, 16);
+
+		chrc.descs = &desc;
+		chrc.num_descs = 1;
+
+		if (!bt_gatt_service_list_add_service(l, &svc, &chrc, 1,
+								NULL, 0))
+			goto fail;
+	}
+
+	return l;
+
+fail:
+	bt_gatt_service_list_free(l);
+	return NULL;
+}
+
 static struct client *client_create(int fd, uint16_t mtu)
 {
 	struct client *cli;
 	struct bt_att *att;
+	struct bt_gatt_service_list *l;
 
 	cli = new0(struct client, 1);
 	if (!cli) {
@@ -129,10 +227,19 @@ static struct client *client_create(int fd, uint16_t mtu)
 		return NULL;
 	}
 
+	l = prepopulate_services();
+	if (!l) {
+		fprintf(stderr, "Failed to pre-populate gatt-client\n");
+		bt_att_unref(att);
+		free(cli);
+		return NULL;
+	}
+
 	cli->fd = fd;
-	cli->gatt = bt_gatt_client_new(att, mtu, NULL);
+	cli->gatt = bt_gatt_client_new(att, mtu, l);
 	if (!cli->gatt) {
 		fprintf(stderr, "Failed to create GATT client\n");
+		bt_gatt_service_list_free(l);
 		bt_att_unref(att);
 		free(cli);
 		return NULL;
@@ -150,6 +257,7 @@ static struct client *client_create(int fd, uint16_t mtu)
 
 	/* bt_gatt_client already holds a reference */
 	bt_att_unref(att);
+	bt_gatt_service_list_free(l);
 
 	return cli;
 }
