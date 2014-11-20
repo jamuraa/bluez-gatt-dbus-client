@@ -448,7 +448,7 @@ static struct context *create_context(uint16_t mtu, gconstpointer data)
 		bt_gatt_exchange_mtu(context->att, mtu, NULL, NULL, NULL);
 		break;
 	case CLIENT:
-		context->client = bt_gatt_client_new(att, mtu);
+		context->client = bt_gatt_client_new(att, mtu, NULL);
 		g_assert(context->client);
 
 		if (g_test_verbose())

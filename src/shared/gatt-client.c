@@ -122,6 +122,13 @@ struct bt_gatt_client {
 	bool in_svc_chngd;
 };
 
+struct bt_gatt_service_list {
+	struct service_list *head, *tail;
+	uint16_t gatt_svc_handle;
+	uint16_t svc_chngd_val_handle;
+	uint16_t svc_chngd_ccc_handle;
+};
+
 struct notify_data {
 	struct bt_gatt_client *client;
 	bool removed;
@@ -917,6 +924,12 @@ static void exchange_mtu_cb(bool success, uint8_t att_ecode, void *user_data)
 					"MTU exchange complete, with MTU: %u",
 					bt_att_get_mtu(client->att));
 
+	/* Don't discover services if they were pre-populated */
+	if (op->result_head) {
+		op->complete_func(op, true, 0);
+		return;
+	}
+
 	if (bt_gatt_discover_all_primary_services(client->att, NULL,
 							discover_primary_cb,
 							discovery_op_ref(op),
@@ -929,7 +942,7 @@ static void exchange_mtu_cb(bool success, uint8_t att_ecode, void *user_data)
 	client->in_init = false;
 
 	if (client->ready_callback)
-		client->ready_callback(success, att_ecode, client->ready_data);
+		client->ready_callback(false, att_ecode, client->ready_data);
 
 	discovery_op_unref(op);
 }
@@ -1197,7 +1210,8 @@ done:
 		client->ready_callback(success, att_ecode, client->ready_data);
 }
 
-static bool gatt_client_init(struct bt_gatt_client *client, uint16_t mtu)
+static bool gatt_client_init(struct bt_gatt_client *client, uint16_t mtu,
+					struct bt_gatt_service_list *services)
 {
 	struct discovery_op *op;
 
@@ -1210,6 +1224,19 @@ static bool gatt_client_init(struct bt_gatt_client *client, uint16_t mtu)
 
 	op->client = client;
 	op->complete_func = init_complete;
+
+	if (services) {
+		/* Take ownership of services */
+		op->result_head = services->head;
+		op->result_tail = services->tail;
+		services->head = NULL;
+		services->tail = NULL;
+
+		client->gatt_svc_handle = services->gatt_svc_handle;
+		client->svc_chngd_val_handle = services->svc_chngd_val_handle;
+		client->svc_chngd_ccc_handle = services->svc_chngd_ccc_handle;
+	}
+
 	op->start = 0x0001;
 	op->end = 0xffff;
 
@@ -1468,7 +1495,8 @@ static void att_disconnect_cb(void *user_data)
 		client->ready_callback(false, 0, client->ready_data);
 }
 
-struct bt_gatt_client *bt_gatt_client_new(struct bt_att *att, uint16_t mtu)
+struct bt_gatt_client *bt_gatt_client_new(struct bt_att *att, uint16_t mtu,
+					struct bt_gatt_service_list *services)
 {
 	struct bt_gatt_client *client;
 
@@ -1508,7 +1536,7 @@ struct bt_gatt_client *bt_gatt_client_new(struct bt_att *att, uint16_t mtu)
 
 	client->att = bt_att_ref(att);
 
-	if (!gatt_client_init(client, mtu))
+	if (!gatt_client_init(client, mtu, services))
 		goto fail;
 
 	return bt_gatt_client_ref(client);
@@ -1595,6 +1623,125 @@ bool bt_gatt_client_set_debug(struct bt_gatt_client *client,
 	client->debug_data = user_data;
 
 	return true;
+}
+
+struct bt_gatt_service_list *bt_gatt_service_list_new(void)
+{
+	struct bt_gatt_service_list *l;
+
+	l = new0(struct bt_gatt_service_list, 1);
+	if (!l)
+		return NULL;
+
+	return l;
+}
+
+bool bt_gatt_service_list_add_service(struct bt_gatt_service_list *l,
+					bt_gatt_service_t *service,
+					bt_gatt_characteristic_t *chrcs,
+					size_t num_chrcs,
+					bt_gatt_included_service_t *includes,
+					size_t num_includes)
+{
+	struct service_list *svc;
+	size_t i, j;
+	uint16_t gatt_svc_handle = 0;
+	uint16_t svc_chngd_val_handle = 0;
+	uint16_t svc_chngd_ccc_handle = 0;
+
+	if (!l || !service || (num_chrcs && !chrcs) ||
+						(num_includes && !includes))
+		return false;
+
+	if (uuid_cmp(service->uuid, GATT_SVC_UUID)) {
+		if (l->gatt_svc_handle)
+			return false;
+
+		gatt_svc_handle = service->start_handle;
+	}
+	if (!service_list_add_service(&l->head, &l->tail, service->primary,
+							service->start_handle,
+							service->end_handle,
+							service->uuid))
+		return false;
+
+	svc = l->tail;
+
+	if (!num_chrcs)
+		goto includes;
+
+	svc->chrcs = new0(struct chrc_data, num_chrcs);
+	if (!svc->chrcs)
+		goto fail;
+
+	for (i = 0; i < num_chrcs; i++) {
+		bool svc_chngd_chrc = false;
+
+		svc->num_chrcs++;
+		svc->chrcs[i].reg_notify_queue = queue_new();
+		if (!svc->chrcs[i].reg_notify_queue)
+			goto fail;
+
+		svc->chrcs[i].chrc_external = chrcs[i];
+		svc->chrcs[i].chrc_external.descs = new0(bt_gatt_descriptor_t,
+							chrcs[i].num_descs);
+		if (!svc->chrcs[i].chrc_external.descs && chrcs[i].num_descs)
+			goto fail;
+
+		memcpy((void *) svc->chrcs[i].chrc_external.descs,
+			chrcs[i].descs,
+			sizeof(bt_gatt_descriptor_t) * chrcs[i].num_descs);
+
+		if (!uuid_cmp(chrcs[i].uuid, SVC_CHNGD_UUID)) {
+			svc_chngd_val_handle = chrcs[i].value_handle;
+			svc_chngd_chrc = true;
+		}
+
+		for (j = 0; j < chrcs[i].num_descs; j++) {
+			const bt_gatt_descriptor_t *desc = chrcs[i].descs + j;
+
+			if (!uuid_cmp(desc->uuid,
+						GATT_CLIENT_CHARAC_CFG_UUID)) {
+				svc->chrcs[i].ccc_handle = desc->handle;
+
+				if (svc_chngd_chrc)
+					svc_chngd_ccc_handle = desc->handle;
+			}
+		}
+	}
+
+includes:
+	if (!num_includes)
+		goto done;
+
+	svc->includes = new0(bt_gatt_included_service_t, num_includes);
+	if (!svc->includes)
+		goto fail;
+
+	memcpy(svc->includes, includes,
+			sizeof(bt_gatt_included_service_t) * num_includes);
+	svc->num_includes = num_includes;
+
+done:
+	l->gatt_svc_handle = gatt_svc_handle;
+	l->svc_chngd_val_handle = svc_chngd_val_handle;
+	l->svc_chngd_ccc_handle = svc_chngd_ccc_handle;
+
+	return true;
+
+fail:
+	service_list_clear_range(&l->head, &l->tail, service->start_handle,
+							service->end_handle);
+	return false;
+}
+
+void bt_gatt_service_list_free(struct bt_gatt_service_list *l)
+{
+	if (!l)
+		return;
+
+	service_list_clear(&l->head, &l->tail);
+	free(l);
 }
 
 bool bt_gatt_service_iter_init(struct bt_gatt_service_iter *iter,

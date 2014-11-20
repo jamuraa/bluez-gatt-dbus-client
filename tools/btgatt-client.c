@@ -130,7 +130,7 @@ static struct client *client_create(int fd, uint16_t mtu)
 	}
 
 	cli->fd = fd;
-	cli->gatt = bt_gatt_client_new(att, mtu);
+	cli->gatt = bt_gatt_client_new(att, mtu, NULL);
 	if (!cli->gatt) {
 		fprintf(stderr, "Failed to create GATT client\n");
 		bt_att_unref(att);

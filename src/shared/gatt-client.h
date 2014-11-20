@@ -28,8 +28,16 @@
 #define BT_GATT_UUID_SIZE 16
 
 struct bt_gatt_client;
+struct bt_gatt_service_list;
 
-struct bt_gatt_client *bt_gatt_client_new(struct bt_att *att, uint16_t mtu);
+/*
+ * Creates a new bt_gatt_client. If "services" is not NULL and non-empty, then
+ * the in memory service cache of bt_gatt_client will be populated based on the
+ * given list, otherwise bt_gatt_client will perform GATT service discovery to
+ * populate its cache.
+ */
+struct bt_gatt_client *bt_gatt_client_new(struct bt_att *att, uint16_t mtu,
+					struct bt_gatt_service_list *services);
 
 struct bt_gatt_client *bt_gatt_client_ref(struct bt_gatt_client *client);
 void bt_gatt_client_unref(struct bt_gatt_client *client);
@@ -38,6 +46,9 @@ typedef void (*bt_gatt_client_destroy_func_t)(void *user_data);
 typedef void (*bt_gatt_client_callback_t)(bool success, uint8_t att_ecode,
 							void *user_data);
 typedef void (*bt_gatt_client_debug_func_t)(const char *str, void *user_data);
+typedef void (*bt_gatt_client_read_callback_t)(bool success, uint8_t att_ecode,
+					const uint8_t *value, uint16_t length,
+					void *user_data);
 typedef void (*bt_gatt_client_write_long_callback_t)(bool success,
 					bool reliable_error, uint8_t att_ecode,
 					void *user_data);
@@ -65,6 +76,7 @@ bool bt_gatt_client_set_debug(struct bt_gatt_client *client,
 					void *user_data,
 					bt_gatt_client_destroy_func_t destroy);
 
+/* Structures that represent a GATT service */
 typedef struct {
 	bool primary;
 	uint16_t start_handle;
@@ -94,6 +106,17 @@ typedef struct {
 	uint8_t uuid[BT_GATT_UUID_SIZE];
 } bt_gatt_included_service_t;
 
+/* Function for manipulating a bt_gatt_service_list */
+struct bt_gatt_service_list *bt_gatt_service_list_new(void);
+bool bt_gatt_service_list_add_service(struct bt_gatt_service_list *l,
+					bt_gatt_service_t *service,
+					bt_gatt_characteristic_t *chrcs,
+					size_t num_chrcs,
+					bt_gatt_included_service_t *includes,
+					size_t num_includes);
+void bt_gatt_service_list_free(struct bt_gatt_service_list *l);
+
+/* Structures and functions for iterating through a bt_gatt_client's services */
 struct bt_gatt_service_iter {
 	struct bt_gatt_client *client;
 	void *ptr;
@@ -130,10 +153,7 @@ bool bt_gatt_include_service_iter_init(struct bt_gatt_incl_service_iter *iter,
 bool bt_gatt_include_service_iter_next(struct bt_gatt_incl_service_iter *iter,
 					const bt_gatt_included_service_t **inc);
 
-typedef void (*bt_gatt_client_read_callback_t)(bool success, uint8_t att_ecode,
-					const uint8_t *value, uint16_t length,
-					void *user_data);
-
+/* Functions for GATT client-role procedures */
 bool bt_gatt_client_read_value(struct bt_gatt_client *client,
 					uint16_t value_handle,
 					bt_gatt_client_read_callback_t callback,
